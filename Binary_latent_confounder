@@ -14,6 +14,8 @@ import sys
 # Set display options to show all columns and rows
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', None)
+
+"""Utilize RCT data including Y,T and Z. No correlation with T"""
 def Generate_experimetnal_data(sample_size):
     [b1, b3, b5] = [1.5, 0.32, 0.4]
 
@@ -41,7 +43,7 @@ def Generate_observational_data(data_exp, labels_exp):
     Z2 = data_exp[:, 1]
     C = data_exp[:, 2]
 
-    """Find ground truth model"""
+    """Find ground truth model: P(Y)=f(T,Z,C), C:confounding covariate"""
     np.random.seed()
     rng_key = random.PRNGKey(np.random.randint(100))
     rng_key, rng_key_ = random.split(rng_key)
@@ -72,7 +74,7 @@ def Generate_observational_data(data_exp, labels_exp):
     print('Ground truth model', intercept, slope)
     """End of ground truth model"""
 
-    """Generate observational data, T is dependent on Z2 and C"""
+    """Generate observational data, T is dependent on Z2 and C: P(T)=f(Z2, C)"""
     sample_size = data_exp.shape[0]
     e = np.random.normal(size=sample_size)
 
@@ -86,6 +88,7 @@ def Generate_observational_data(data_exp, labels_exp):
     # Add T_new in the first column
     data_obs = np.concatenate((T_new[:, np.newaxis], data_exp[:, 1:]), axis=1)
 
+    #The fake outcome Y'=f(T_new,Z2,C)
     logit_Y = intercept + np.dot(data_obs, slope)
     pr = 1 / (1 + np.exp(-logit_Y))
     # print('prob of observational', pr[0:10])
