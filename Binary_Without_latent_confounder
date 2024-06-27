@@ -1,0 +1,408 @@
+
+
+"""In this example we simulate data Y(binary),T(binary),Z2(continuous) without latent confounding C(continuous)"""
+import jax
+import jax.numpy as jnp
+import numpy as np
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
+from jax import random
+from itertools import combinations
+import pandas as pd
+import math
+import sys
+
+# Set display options to show all columns and rows
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+
+"""In this example we simulate data with binary outcome Y, when there is NO LATENT CONFOUNDING variable in our dataset:
+- The dataset include 3 variables: 2 continuous: Z2, C ~ N(0,10) and one binary treatment T and the binary outcome Y
+- We assume that we have available experimental data, and we want to create observational data with 2 known confounding
+ variables C, Z2
+- Observational causal Graph:
+                            T -> Y
+                            C -> Y
+                            Z2 -> Y
+                        Confounders:
+                            Z2 -> T
+                            C -> T   
+                            """
+def Generate_experimetnal_data(sample_size):
+    """Adjust the beta coefficient change the relations between variables:
+            Y ~  b1*T + b3*Z2 + b5*C
+        Remember that always the treatment, T will be in the first column"""
+    [b1, b3, b5] = [1.5, 0.2, 0.3]
+
+    np.random.seed()
+    # rng_key = random.PRNGKey(42)
+    e = np.random.normal(size=sample_size)
+
+    Z2 = np.random.normal(0, 10, sample_size)
+    T = np.random.binomial(1, 0.5, sample_size)
+    C = np.random.normal(0, 10, sample_size)
+
+    logit_Y = 1 + b1*T + b3*Z2 + b5*C
+
+    pr = 1 / (1 + np.exp(-logit_Y))  # pass through an inv-logit function
+    # print('prob of experimental', pr[0:10])
+    y = np.random.binomial(n=1, p=pr, size=sample_size)  # bernoulli response variable
+    X = np.column_stack((T, Z2, C))
+
+    return X, y
+
+def Generate_observational_data(data_exp, labels_exp):
+    """Coefficient b4 will be adjusted to change the confouning relation between T,Y and C"""
+
+    b4 = 0.2
+    [b1, b2, b3, b4, b5] = [1.5, 0.2, 0.3, b4, 0.4]
+
+    Z2 = data_exp[:, 1]
+    C = data_exp[:, 2]
+
+    """Find ground truth model: P(Y)=f(T,Z,C), C:confounding covariate"""
+    np.random.seed()
+    rng_key = random.PRNGKey(np.random.randint(100))
+    rng_key, rng_key_ = random.split(rng_key)
+
+    def model(data, labels):
+        D = data.shape[1]
+        alpha = numpyro.sample("alpha", dist.Cauchy(0, 10))
+        beta = numpyro.sample("beta", dist.Cauchy(jnp.zeros(D), 2.5 * jnp.ones(D)))
+        logits = alpha + jnp.dot(data, beta)
+        return numpyro.sample("obs", dist.Bernoulli(logits=logits), obs=labels)
+
+    # Run NUTS.
+    kernel = NUTS(model)
+    num_samples = 10000
+    mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+    mcmc.run(
+        rng_key_, data_exp, labels_exp
+    )
+    mcmc.print_summary()
+
+    trace = mcmc.get_samples()
+    intercept = trace['alpha'].mean()
+    slope_list = []
+    for i in range(len(trace['beta'][0, :])):
+        slope_list.append(trace['beta'][:, i].mean())
+
+    slope = np.array(slope_list)
+    print('Ground truth model', intercept, slope)
+    """End of ground truth model"""
+
+    """Generate observational data, T is dependent on Z2 and C: P(T)=f(Z2, C)"""
+    sample_size = data_exp.shape[0]
+    e = np.random.normal(size=sample_size)
+
+    logit_T = b2*Z2 + b4*C
+    prob = 1 / (1 + np.exp(-logit_T))
+    # print('prob of T_new', prob[0:10])
+
+    T_new = np.random.binomial(1, prob.flatten())
+    # print('how many 1 in T_new', np.count_nonzero(T_new == 1))
+
+    # Add T_new in the first column
+    data_obs = np.concatenate((T_new[:, np.newaxis], data_exp[:, 1:]), axis=1)
+
+    #The fake outcome Y'=f(T_new,Z2,C)
+    logit_Y = intercept + np.dot(data_obs, slope)
+    pr = 1 / (1 + np.exp(-logit_Y))
+    # print('prob of observational', pr[0:10])
+    labels_obs = np.random.binomial(n=1, p=pr, size=sample_size)
+
+    return data_obs, labels_obs
+
+def binary_logistic_regression(data, labels):
+
+     D = data.shape[1]
+     alpha = numpyro.sample("alpha", dist.Cauchy(0, 10))
+     beta = numpyro.sample("beta", dist.Cauchy(jnp.zeros(D), 2.5 * jnp.ones(D)))
+     logits = alpha + jnp.dot(data, beta)
+     return numpyro.sample("obs", dist.Bernoulli(logits=logits), obs=labels)
+
+def log_likelihood_calculation(alpha, beta, data, obs):
+     logits = alpha + jnp.dot(data, beta)
+     log_likelihood = dist.Bernoulli(logits=logits).log_prob(obs)
+     return log_likelihood.sum()
+
+def sample_prior(data, num_samples):
+
+     prior_samples = {}
+     D = data.shape[1]
+
+     prior_samples1 = dist.Cauchy(jnp.zeros(D), 2.5*jnp.ones(D)).sample(random.PRNGKey(0), (num_samples,))
+     prior_samples2 = dist.Cauchy(jnp.zeros(1), 10*jnp.ones(1)).sample(random.PRNGKey(0), (num_samples,))
+
+     prior_samples["beta"] = prior_samples1
+     prior_samples["alpha"] = prior_samples2
+
+     return prior_samples
+
+def sample_posterior(data, observed_data, num_samples):
+
+         D = data.shape[1]
+
+         kernel = NUTS(binary_logistic_regression)
+         mcmc = MCMC(kernel, num_warmup=1000, num_samples=num_samples)
+         mcmc.run(jax.random.PRNGKey(42), data, observed_data)
+
+         # Get the posterior samples
+         posterior_samples = mcmc.get_samples()
+         # import arviz as az
+         # import matplotlib.pyplot as plt
+         # data_plot = az.from_numpyro(mcmc)
+         # az.plot_trace(data_plot, compact=True, figsize=(15, 25))
+         # plt.show()
+
+         return posterior_samples
+
+def calculate_log_marginal(num_samples, samples, data, observed_data):
+     log_likelihoods = jnp.zeros(num_samples)
+
+     for i in range(num_samples):
+         log_likelihoods = log_likelihoods.at[i].set(log_likelihood_calculation(samples["alpha"][i], samples["beta"][i],
+                                                                                data, observed_data))
+     # Estimate the log marginal likelihood using the log-sum-exp trick
+     log_marginal_likelihood = jax.scipy.special.logsumexp(log_likelihoods) - jnp.log(num_samples)
+     # print('marginal', log_marginal_likelihood)
+
+     return log_marginal_likelihood
+
+Log_loss_alg = []
+Log_loss_exp = []
+Log_loss_obs = []
+
+df = pd.DataFrame(columns=['Hz1', 'Hzc1', 'Hz2', 'Hzc2', 'Hz3', 'Hzc3', 'Hz4', 'Hzc4'])
+
+ne = 50  #Adjust the number of De
+N_D_test = 1 #Number of different datasets that you want to test the algorithm
+
+for k in range(N_D_test):
+    P_HAT_alg = {}
+    P_HAT_exp = {}
+    P_HAT_obs = {}
+    No = 1000
+    Ne = ne
+    data_exp, labels_exp = Generate_experimetnal_data(4000)
+    data_test, labels_test = data_exp[No + 1:No + 1001, :], labels_exp[No + 1:No + 1001]
+    data_obs, labels_obs = Generate_observational_data(data_exp[0:No, :], labels_exp[0:No])
+    # print('how many 1 in observational', np.count_nonzero(labels_obs == 1))
+    data_obs[:, -2:] = (data_obs[:, -2:] - data_obs[:, -2:].mean(axis=0)) / data_obs[:, -2:].std(axis=0)
+    data_test[:, -2:] = (data_test[:, -2:] - data_test[:, -2:].mean(axis=0)) / data_test[:, -2:].std(axis=0)
+    data_exp[:, -2:] = (data_exp[:, -2:] - data_exp[:, -2:].mean(axis=0)) / data_exp[:, -2:].std(axis=0)
+
+    """Let's assume that there is no latent confounder and that MB(Y)=(T,Z2,C)"""
+    IMB = [(0, 1, 2)]
+    for MB in IMB:
+        sample_list = list(MB)
+
+        """Searching for subsets of MB that contain the treatment T"""
+        subset_list = []
+        for s in range(len(sample_list)):
+            list_combinations = list(combinations(sample_list, len(sample_list) - s))
+            for x in list_combinations:
+                if x[0] == 0:
+                    subset_list.append(x)
+        print('The subsets of MB are {}'.format(subset_list))
+
+        data_exp, labels_exp = data_exp[0:Ne, :], labels_exp[0:Ne]
+        # print('how many 1 in experimental', np.count_nonzero(labels_exp == 1))
+
+        P_CMB = {}
+        P_not_CMB = {}
+        P_Hzc = {}
+        P_Hz_not_c = {}
+        P_HZ = {}
+        P_HZC = {}
+
+        correct_IMB = 0
+        num_samples = 1000
+
+        """P(Do| H_MB)"""
+        sub_data = data_obs[:, MB]
+        prior_samples = sample_prior(sub_data, num_samples)
+        marginal_MB = calculate_log_marginal(num_samples, prior_samples, sub_data, labels_obs)
+        P_Do = marginal_MB
+        print("P(DO|MB)", P_Do)
+
+        for j in range(len(subset_list)):
+            reg_variables = subset_list[j]
+            sub_data = data_obs[:, reg_variables]
+            exp_sub_data = data_exp[:, reg_variables]
+
+            posterior_samples = sample_posterior(sub_data, labels_obs, num_samples)
+
+            prior_samples = sample_prior(exp_sub_data, num_samples)
+
+            marginal = calculate_log_marginal(num_samples, prior_samples, exp_sub_data, labels_exp)
+            # print('Marginal {} from experimental sampling:'.format(reg_variables), marginal)
+            """P(De|Do, Hzc_)"""
+            P_not_CMB[reg_variables] = marginal
+
+            marginal = calculate_log_marginal(num_samples, posterior_samples, exp_sub_data, labels_exp)
+            # print('Marginal {} from observational sampling:'.format(reg_variables), marginal)
+            """P(De|Do, Hzc)"""
+            P_CMB[reg_variables] = marginal
+
+            if P_CMB[reg_variables] > P_not_CMB[reg_variables]:
+                print("CMB", reg_variables)
+                CMB = reg_variables
+
+            #Numeratot of Equation (1)
+            """Calculate P(Do| HZc) = P_Do <>0 for MB"""
+            if reg_variables == MB:
+                P_Hzc[reg_variables] = P_CMB[reg_variables] + P_Do
+            else:
+                P_Hzc[reg_variables] = P_CMB[reg_variables] + math.log(sys.float_info.min)
+
+            """Calculate P(Hzc_| Do,De):"""
+            P_Hz_not_c[reg_variables] = P_not_CMB[reg_variables] + P_Do
+
+            test_sub_data = data_test[:, reg_variables]
+
+            # Calclulate P_hat(Y) without multiply them with P(HZ|De,Do)
+            """1. Assuming Hzc we can use both observational and experimental data"""
+            rng_key = random.PRNGKey(np.random.randint(100))
+            rng_key, rng_key_ = random.split(rng_key)
+            combined_X = np.concatenate((sub_data, exp_sub_data), axis=0)  # Concatenate row-wise
+            combined_y = np.concatenate((labels_obs, labels_exp), axis=0)  # Concatenate row-wise
+            kernel = NUTS(binary_logistic_regression)
+            num_samples = 1000
+            mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+            mcmc.run(
+                rng_key_, combined_X, combined_y
+            )
+
+            trace = mcmc.get_samples()
+            intercept_alg = trace['alpha'].mean()
+            slope_list = []
+            for i in range(len(trace['beta'][0, :])):
+                slope_list.append(trace['beta'][:, i].mean())
+
+            slope_alg = np.array(slope_list)
+            print('intercept and slope from observational + experimental:', intercept_alg, slope_alg)
+            logt_alg = intercept_alg + np.dot(test_sub_data, slope_alg)
+            pr_1_alg = 1 / (1 + np.exp(-logt_alg))
+            P_hat_alg = pr_1_alg
+            P_HAT_alg[reg_variables] = P_hat_alg
+
+            """1. Assuming Hzc_ we can use only experimental data"""
+            rng_key = random.PRNGKey(np.random.randint(100))
+            rng_key, rng_key_ = random.split(rng_key)
+            kernel = NUTS(binary_logistic_regression)
+            num_samples = 1000
+            mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+            mcmc.run(
+                rng_key_, exp_sub_data, labels_exp
+            )
+
+            trace = mcmc.get_samples()
+            intercept_exp = trace['alpha'].mean()
+            slope_list = []
+            for i in range(len(trace['beta'][0, :])):
+                slope_list.append(trace['beta'][:, i].mean())
+
+            slope_exp = np.array(slope_list)
+            print('intercept and slope from experimental:', intercept_exp, slope_exp)
+            logt_exp = intercept_exp + np.dot(test_sub_data, slope_exp)
+            pr_1_exp = 1 / (1 + np.exp(-logt_exp))
+            pr_0_exp = 1 - pr_1_exp
+            P_hat_exp = pr_1_exp
+            P_HAT_exp[reg_variables] = P_hat_exp
+
+            """1. Assuming Hzc we can use only observational data"""
+            rng_key = random.PRNGKey(np.random.randint(100))
+            rng_key, rng_key_ = random.split(rng_key)
+            kernel = NUTS(binary_logistic_regression)
+            num_samples = 1000
+            mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+            mcmc.run(
+                rng_key_, sub_data, labels_obs
+            )
+
+            trace = mcmc.get_samples()
+            intercept_obs = trace['alpha'].mean()
+            slope_list = []
+            for i in range(len(trace['beta'][0, :])):
+                slope_list.append(trace['beta'][:, i].mean())
+
+            slope_obs = np.array(slope_list)
+            print('intercept and slope from observational:', intercept_obs, slope_obs)
+            logt_obs = intercept_obs + np.dot(test_sub_data, slope_obs)
+            pr_1_obs = 1 / (1 + np.exp(-logt_obs))
+            pr_0_obs = 1 - pr_1_obs
+            # how many 1s in test dataset
+            P_1_prior = np.count_nonzero(labels_test == 1)/len(labels_test)
+            P_hat_obs = pr_1_obs
+            P_HAT_obs[reg_variables] = P_hat_obs
+
+        print('P(De|Do,HZ)', P_CMB)
+        print('P(De|Do,HZc)', P_not_CMB)
+        print('P(De|Do,HZ )P(Do|HZ )', P_Hzc)
+        print('P(De|Do,HZc )P(Do|HZc )', P_Hz_not_c)
+
+        # Calculate the log(p1+p2+p3) when you have log(p1),log(p2),log(p3)
+        val_P_Hzc = list(P_Hzc.values())
+        val_P_Hzc_ = list(P_Hz_not_c.values())
+        # Combine the values of p's into a single list
+        combined_values = val_P_Hzc + val_P_Hzc_
+        lns = [value for value in combined_values]
+        sum_logs = jax.scipy.special.logsumexp(np.array(lns))
+        # print("The log of the sum of the numbers is:", sum_logs)
+
+        #Calculate equation 1
+        for i in range(len(subset_list)):
+            reg_variables = subset_list[i]
+            P_HZ[reg_variables] = math.exp(val_P_Hzc[i] - sum_logs)
+            P_HZC[reg_variables] = math.exp(val_P_Hzc_[i] - sum_logs)
+            P_HZC[reg_variables] = math.exp(val_P_Hzc_[i]-sum_logs)
+            print('PHz for set', reg_variables, P_HZ[reg_variables])
+            print('PHzc for set', reg_variables, P_HZC[reg_variables])
+
+        new_row = [P_HZ[(0, 1, 2)], P_HZC[(0, 1, 2)], P_HZ[(0, 1)], P_HZC[(0, 1)], P_HZ[(0, 2)], P_HZC[(0, 2)], P_HZ[(0,)], P_HZC[(0,)]]
+
+        df.loc[len(df)] = new_row
+
+    #Calculate the average post-intervention outcome
+    P_Yzc = {}
+    P_Yz_not_c = {}
+    # print('P_HAT_exp', P_HAT_exp)
+    # print('PHZ', P_HZ)
+    # print('PHZC', P_HZC)
+    for key in P_HZC:
+        """Can use only De"""
+        P_Yz_not_c[key] = P_HZC[key] * P_HAT_exp[key]
+
+    for key in P_HZ:
+        """Use both Do and De"""
+        P_Yzc[key] = P_HZ[key] * P_HAT_alg[key]
+
+    # print('P_Yz_not_c', P_Yz_not_c)
+    # print('P_Yzc', P_Yzc)
+    from sklearn.metrics import log_loss
+
+    P_Y_alg = sum(P_Yzc.values()) + sum(P_Yz_not_c.values())
+    # print(P_Y_alg)
+    Log_loss_alg.append(log_loss(labels_test, P_Y_alg))
+    # print('With our algorithm P(Y|do(X), V) ', P_Y_alg)
+    print('Log loss function for our algorithm', log_loss(labels_test, P_Y_alg))
+
+    P_Y_exp = P_HAT_exp[(0, 1, 2)]
+    # print('With experimental data P(Y|do(X), V)', P_Y_exp)
+    Log_loss_exp.append(log_loss(labels_test, P_Y_exp))
+    print('Log loss function for experimental data', log_loss(labels_test, P_Y_exp))
+
+    P_Y_obs = P_HAT_obs[(0, 1, 2)]
+    # print('With observational data P(Y|do(X), V)', P_Y_obs)
+    Log_loss_obs.append(log_loss(labels_test, P_Y_obs))
+    print('Log loss function for observational data', log_loss(labels_test, P_Y_obs))
+
+print('Log loss from our algorithm', Log_loss_alg)
+print('Log loss in experimental', Log_loss_exp)
+print('Log loss in observational', Log_loss_obs)
+
+"""df is the dataframe that contains for each subset of MB the PHz and PHzc. For every subset, by adding PHz and 
+PHzc you can find the probability of a set Z to be an IMB:"""
+print(df)
