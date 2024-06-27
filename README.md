@@ -20,7 +20,9 @@ It can be applied in scenarios where we synthetically introduce a set of confoun
 
 ### Implementation
 
-We simulate Experimental (De) and Observational (Do) data, where Do>>De in two scenarios: when a latent confounder exists and when there is no latent confounding variable, in the case of both binary and ordinal outcomes. In the code given, you can adjust the confounding coefficient, b4, the number of experimental data, ne, and the number of different datasets you want to test the algorithm, N_D_test.
+We simulate Experimental (De) and Observational (Do) data, where Do>>De in two scenarios: 
+
+1. When an unmeasured confounder, C, exists and another measured confounder is present in the data, and when there is no unmeasured confounding variable, in the case of both binary and ordinal outcomes. In the code given, you can adjust the confounding coefficient, b4, the number of experimental data, ne, and the number of different datasets you want to test the algorithm, N_D_test.
 
 We evaluate our methods in how well they predict the outcome in a new experimental data set with 1000 samples.
 
