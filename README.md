@@ -39,3 +39,5 @@ This project uses several Python packages to perform probabilistic programming, 
 
 You can also visualize the posterior distributions of regression parameters using the ArviZ and Matplotlib packages by uncommenting the corresponding lines in the function "sample_posterior".
   
+## Contact
+If you have any questions, email me:  [konlelova@gmail.com](mailto:konlelova@gmail.com) 
