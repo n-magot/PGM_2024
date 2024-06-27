@@ -17,7 +17,7 @@ pd.set_option('display.max_rows', None)
 
 """Utilize RCT data including Y,T and Z. No correlation with T"""
 def Generate_experimetnal_data(sample_size):
-    [b1, b3, b5] = [1.5, 0.32, 0.4]
+    [b1, b3, b5] = [1.5, 0.32, 0.42]
 
     np.random.seed()
     # rng_key = random.PRNGKey(42)
@@ -38,7 +38,7 @@ def Generate_experimetnal_data(sample_size):
 
 def Generate_observational_data(data_exp, labels_exp):
 
-    [b1, b2, b3, b4, b5] = [1.5, 0.22, 0.32, 0.4, 0.42]
+    [b1, b2, b3, b4, b5] = [1.5, 0.22, 0.32, 0.4, 0.42] # [b1, b2, b3, b4]
 
     Z2 = data_exp[:, 1]
     C = data_exp[:, 2]
