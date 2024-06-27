@@ -32,4 +32,6 @@ This project uses several Python packages to perform probabilistic programming, 
 * NumPyro
 * itertools
 * pandas
-* 
+
+You can also visualize the posterior distributions of regression parameters using the ArviZ and Matplotlib packages by uncommenting the corresponding lines in the function "sample_posterior".
+  
