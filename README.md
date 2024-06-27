@@ -12,13 +12,14 @@ Our method extends the recent algorithm (FindIMB) proposed in [Triantafillou et 
 
 FindIMB extended algorithm, uses Bayesian regression models and approximate inference for combining observational and experimental data to learn causal and interventional Markov boundaries and improve causal estimation. 
 
-It can be applied in scenarios when we synthetically introduce into the observational data a set of confounder variables C between treatment and outcome O in three ways: 
+It can be applied in scenarios where we synthetically introduce a set of confounding variables, C between treatment and outcome, O in three ways:
 
 * Measured confounders only
 * Unmeasured confounders only
 * Measured and unmeasured confounders
 
 **Implementation**
+
 We simulate experimental(De) and observational(Do) data, where Do>>De in two scenarios: when a latent confounder exists and when there is no latent confounding variable. In the code given you can adjust the confounding coefficient, b4, and the number of experimental data.
 
 We evaluate our methods in how well they predict the outcome in a new experimental data set with 1000 samples.
