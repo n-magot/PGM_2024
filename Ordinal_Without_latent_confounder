@@ -1,0 +1,466 @@
+"""In this example we simulate data Y(ordinal),T(binary),Z2(continuous) and a latent confounder C(continuous)"""
+import jax
+import jax.numpy as jnp
+import numpy as np
+import numpyro
+import numpyro.distributions as dist
+from jax import random, vmap
+from itertools import combinations
+import pandas as pd
+import math
+import sys
+import arviz as az
+from numpyro import sample, handlers
+from numpyro.distributions import (
+    Dirichlet,
+    TransformedDistribution,
+    transforms,
+)
+from numpyro.infer import MCMC, NUTS
+from numpyro.infer.reparam import TransformReparam
+from sklearn.metrics import log_loss, mean_squared_error
+numpyro.enable_x64()
+
+# Set display options to show all columns and rows
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+def Generate_experimetnal_data(sample_size):
+    [b1, b3, b5] = [1.5, 0.33, 0.42] #b5 is the coef of latent confounder
+
+    np.random.seed()
+    # rng_key = random.PRNGKey(42)
+    e = np.random.normal(size=sample_size)
+
+    Z2 = np.random.normal(0, 10, sample_size)
+    T = np.random.binomial(1, 0.5, sample_size)
+    C = np.random.normal(0, 10, sample_size)
+
+    logit_0 = -3 - (b1*T + b3*Z2 + b5*C) #remember here they have the formula from plor package that has (-)
+    logit_1 = 3 - (b1*T + b3*Z2 + b5*C)
+    q_0 = 1 / (1 + np.exp(-logit_0))
+    q_1 = 1 / (1 + np.exp(-logit_1))
+    prob_0 = q_0
+    prob_1 = q_1 - q_0
+    prob_2 = 1 - q_1
+    probs = jnp.stack((prob_0, prob_1, prob_2), axis=1)
+
+    Y = dist.Categorical(probs=probs).sample(random.PRNGKey(np.random.randint(100)), sample_shape=(1,))[0]
+    X = np.column_stack((T, Z2, C))
+
+    return X, Y
+
+def Generate_observational_data(data_exp, labels_exp):
+
+    [b1, b2, b3, b4, b5] = [1.5, 0.25, 0.33, 0.2, 0.42] #b4 is the coef of latent confounder
+
+    Z2 = data_exp[:, 1]
+    C = data_exp[:, 2]
+
+    """Find ground truth model"""
+    np.random.seed()
+    rng_key = random.PRNGKey(np.random.randint(100))
+    rng_key, rng_key_ = random.split(rng_key)
+
+    def model(data, labels):
+        D = data.shape[1]
+        N_classes = 3
+        concentration = np.ones((N_classes,)) * 1
+        anchor_point = 0.0
+
+        coefs = numpyro.sample('coefs', dist.Cauchy(jnp.zeros(D), 2.5 * jnp.ones(D)))
+
+        with handlers.reparam(config={"cutpoints": TransformReparam()}):
+            cutpoints = sample(
+                "cutpoints",
+                TransformedDistribution(
+                    Dirichlet(concentration),
+                    transforms.SimplexToOrderedTransform(anchor_point),
+                ),
+            )
+
+        logits = jnp.sum(coefs * data, axis=-1)
+
+        return numpyro.sample('obs', dist.OrderedLogistic(predictor=logits, cutpoints=cutpoints), obs=labels)
+
+    # Run NUTS.
+    kernel = NUTS(model)
+    num_samples = 1000
+    mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+    mcmc.run(
+        rng_key_, data_exp, labels_exp
+    )
+    mcmc.print_summary(exclude_deterministic=False)
+
+    trace = mcmc.get_samples()
+    cutpoint0 = (trace['cutpoints'][0][0] + trace['cutpoints'][1][0])/2
+    cutpoint1 = (trace['cutpoints'][0][1] + trace['cutpoints'][1][1])/2
+
+    slope_list = []
+    for i in range(len(trace['coefs'][0, :])):
+        slope_list.append(trace['coefs'][:, i].mean())
+
+    slope = np.array(slope_list)
+    print('Ground truth model', cutpoint0, cutpoint1, slope)
+    """End of ground truth model"""
+    """Generate observational data, T is dependent on Z2 and C"""
+    sample_size = data_exp.shape[0]
+    e = np.random.normal(size=sample_size)
+
+    logit_T = 1 + b2*Z2 + b4*C
+    prob = 1 / (1 + np.exp(-logit_T))
+    # print('prob of T_new', prob[0:10])
+
+    T_new = np.random.binomial(n=1, p=prob, size=sample_size)
+
+
+    # Add T_new in the first column
+    data_obs = np.concatenate((T_new[:, np.newaxis], data_exp[:, 1:]), axis=1)
+
+    logit_0 = cutpoint0 - np.dot(data_obs, slope)
+    logit_1 = cutpoint1 - np.dot(data_obs, slope)
+    q_0 = 1 / (1 + np.exp(-logit_0))
+    q_1 = 1 / (1 + np.exp(-logit_1))  # probability of class 1 or 0
+    prob_0 = q_0
+    prob_1 = q_1 - q_0
+    prob_2 = 1 - q_1
+    probs = jnp.stack((prob_0, prob_1, prob_2), axis=1)
+
+    labels_obs = dist.Categorical(probs=probs).sample(random.PRNGKey(np.random.randint(100)), sample_shape=(1,))[0]
+
+    return data_obs, labels_obs
+
+def ordinal_logistic_regression(data, labels):
+    D = data.shape[1]
+    N_classes = 3
+
+    coefs = numpyro.sample('coefs', dist.Cauchy(jnp.zeros(D), 2.5 * jnp.ones(D)))
+
+    concentration = np.ones((N_classes,)) * 1
+    anchor_point = 0.0
+    with handlers.reparam(config={"cutpoints": TransformReparam()}):
+        cutpoints = sample(
+            "cutpoints",
+            TransformedDistribution(
+                Dirichlet(concentration),
+                transforms.SimplexToOrderedTransform(anchor_point),
+            ),
+        )
+    logits = jnp.sum(coefs * data, axis=-1)
+
+    return numpyro.sample('obs', dist.OrderedLogistic(predictor=logits, cutpoints=cutpoints), obs=labels)
+
+
+def log_likelihood_calculation(cutpoints, coefs, data, obs):
+
+    logits = jnp.dot(data, coefs)
+    log_likelihood = dist.OrderedLogistic(predictor=logits, cutpoints=cutpoints).log_prob(obs)
+    return log_likelihood.sum()
+
+def sample_prior(data, num_samples):
+
+    prior_samples = {}
+    D = data.shape[1]
+    N_classes = 3
+    concentration = np.ones((N_classes,)) * 1
+    anchor_point = 0.0
+
+    coefs = dist.Cauchy(jnp.zeros(D), 2.5 * jnp.ones(D)).sample(random.PRNGKey(0), (num_samples,))
+
+    cutpoints = (TransformedDistribution(Dirichlet(concentration), transforms.SimplexToOrderedTransform(anchor_point), )
+                 .sample(random.PRNGKey(0), (num_samples,)))
+
+    prior_samples['coefs'] = coefs
+    prior_samples['cutpoints'] = cutpoints
+
+    return prior_samples
+
+def sample_posterior(data, observed_data, num_samples):
+    kernel = NUTS(ordinal_logistic_regression)
+    mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+    mcmc.run(
+        jax.random.PRNGKey(42), data, observed_data
+    )
+    # Get the posterior samples
+    posterior_samples = mcmc.get_samples()
+    # mcmc.print_summary(exclude_deterministic=False)
+    # data_plot = az.from_numpyro(mcmc)
+    # az.plot_trace(data_plot, compact=True, figsize=(15, 25))
+    # plt.show()
+    return posterior_samples
+
+def calculate_log_marginal(num_samples, samples, data, observed_data):
+    log_likelihoods = jnp.zeros(num_samples)
+
+    for i in range(num_samples):
+        log_likelihoods = log_likelihoods.at[i].set(log_likelihood_calculation(samples["cutpoints"][i],
+                                                                               samples["coefs"][i], data, observed_data))
+    # Estimate the log marginal likelihood using the log-sum-exp trick
+    log_marginal_likelihood = jax.scipy.special.logsumexp(log_likelihoods) - jnp.log(num_samples)
+    return log_marginal_likelihood
+
+mse_alg = []
+mse_exp = []
+mse_obs = []
+
+df = pd.DataFrame(columns=['Hz1', 'Hzc1', 'Hz2', 'Hzc2', 'Hz3', 'Hzc3', 'Hz4', 'Hzc4'])
+ne_list = [50]
+N_D_test = 20
+for ne in ne_list:
+    for k in range(N_D_test):
+        P_HAT_alg = {}
+        P_HAT_exp = {}
+        P_HAT_obs = {}
+        No = 1000
+        Ne = ne
+        data_exp, labels_exp = Generate_experimetnal_data(4000)
+        data_test, labels_test = data_exp[No + 1:No + 1001, :], labels_exp[No + 1:No + 1001]
+
+        data_obs, labels_obs = Generate_observational_data(data_exp[0:No, :], labels_exp[0:No])
+        # print('how many 1 in observational', np.count_nonzero(labels_obs == 1))
+
+        # data_obs[:, -2:] = (data_obs[:, -2:] - data_obs[:, -2:].mean(axis=0)) / data_obs[:, -2:].std(axis=0)
+        # data_test[:, -2:] = (data_test[:, -2:] - data_test[:, -2:].mean(axis=0)) / data_test[:, -2:].std(axis=0)
+        # data_exp[:, -2:] = (data_exp[:, -2:] - data_exp[:, -2:].mean(axis=0)) / data_exp[:, -2:].std(axis=0)
+
+        """Let's assume that C is a latent confounder and that MB(Y)=(T,Z2)"""
+        IMB = [(0, 1, 2)]
+        for MB in IMB:
+            sample_list = list(MB)
+
+            """Searching for subsets of MB that contain the treatment T"""
+            subset_list = []
+            for s in range(len(sample_list)):
+                list_combinations = list(combinations(sample_list, len(sample_list) - s))
+                for x in list_combinations:
+                    if x[0] == 0:
+                        subset_list.append(x)
+            print('The subsets of MB are {}'.format(subset_list))
+
+            data_exp, labels_exp = data_exp[0:Ne, :], labels_exp[0:Ne]
+            # print('experimental', data_exp[0:10, :])
+            # print('observational', data_obs[0:10, :])
+            # print('test', data_test[0:10, :])
+
+
+            # print('how many 1 in experimental', np.count_nonzero(labels_exp == 1))
+
+            """For subsets of MB sample from experimental and observational data"""
+            P_CMB = {}
+            P_not_CMB = {}
+            P_Hzc = {}
+            P_Hz_not_c = {}
+            P_HZ = {}
+            P_HZC = {}
+
+            correct_IMB = 0
+            num_samples = 1000
+
+            """P(Do| H_MB)"""
+            sub_data = data_obs[:, MB]
+            prior_samples = sample_prior(sub_data, num_samples)
+            marginal_MB = calculate_log_marginal(num_samples, prior_samples, sub_data, labels_obs)
+            P_Do = marginal_MB
+            print("P(DO|MB)", P_Do)
+
+            for j in range(len(subset_list)):
+                reg_variables = subset_list[j]
+                sub_data = data_obs[:, reg_variables]
+                exp_sub_data = data_exp[:, reg_variables]
+
+                posterior_samples = sample_posterior(sub_data, labels_obs, num_samples)
+
+                prior_samples = sample_prior(exp_sub_data, num_samples)
+
+                marginal = calculate_log_marginal(num_samples, prior_samples, exp_sub_data, labels_exp)
+                # print('Marginal {} from experimental sampling:'.format(reg_variables), marginal)
+                """P(De|Do, Hzc_)"""
+                P_not_CMB[reg_variables] = marginal
+
+                marginal = calculate_log_marginal(num_samples, posterior_samples, exp_sub_data, labels_exp)
+                # print('Marginal {} from observational sampling:'.format(reg_variables), marginal)
+                """P(De|Do, Hzc)"""
+                P_CMB[reg_variables] = marginal
+
+                if P_CMB[reg_variables] > P_not_CMB[reg_variables]:
+                    print("CMB", reg_variables)
+                    CMB = reg_variables
+
+                #Numeratot of Equation (1)
+                """Calculate P(Do| HZc) = P_Do <>0 for MB"""
+                if reg_variables == MB:
+                    P_Hzc[reg_variables] = P_CMB[reg_variables] + P_Do
+                else:
+                    P_Hzc[reg_variables] = P_CMB[reg_variables] + 10*math.log(sys.float_info.min)
+
+                """Calculate P(Hzc_| Do,De):"""
+                P_Hz_not_c[reg_variables] = P_not_CMB[reg_variables] + P_Do
+
+                test_sub_data = data_test[:, reg_variables]
+
+                # Calclulate P_hat(Y) without muliply them with P(HZ|De,Do)
+                """1. Assuming Hzc we can use both observational and experimental data"""
+                rng_key = random.PRNGKey(np.random.randint(100))
+                rng_key, rng_key_ = random.split(rng_key)
+                combined_X = np.concatenate((sub_data, exp_sub_data), axis=0)  # Concatenate row-wise
+                combined_y = np.concatenate((labels_obs, labels_exp), axis=0)  # Concatenate row-wise
+                kernel = NUTS(ordinal_logistic_regression)
+                num_samples = 1000
+                mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+                mcmc.run(
+                    rng_key_, combined_X, combined_y
+                )
+
+                mcmc.print_summary(exclude_deterministic=False)
+
+                trace = mcmc.get_samples()
+                cutpoint0_alg = (trace['cutpoints'][0][0] + trace['cutpoints'][1][0]) / 2
+                cutpoint1_alg = (trace['cutpoints'][0][1] + trace['cutpoints'][1][1]) / 2
+
+                slope_list = []
+                for i in range(len(trace['coefs'][0, :])):
+                    slope_list.append(trace['coefs'][:, i].mean())
+
+                slope_alg = np.array(slope_list)
+                print('cutpoints and slope from observational + experimental:', cutpoint0_alg, cutpoint1_alg, slope_alg)
+                logit_0 = cutpoint0_alg - np.dot(test_sub_data, slope_alg)
+                logit_1 = cutpoint1_alg - np.dot(test_sub_data, slope_alg)
+                q_0 = 1 / (1 + np.exp(-logit_0))
+                q_1 = 1 / (1 + np.exp(-logit_1))  # probability of class 1 or 0
+                prob_0 = q_0
+                prob_1 = q_1 - q_0
+                prob_2 = 1 - q_1
+                probs = jnp.stack((prob_0, prob_1, prob_2), axis=1)
+                P_HAT_alg[reg_variables] = probs
+
+                """1. Assuming Hzc we can use only experimental data"""
+                rng_key = random.PRNGKey(np.random.randint(100))
+                rng_key, rng_key_ = random.split(rng_key)
+                kernel = NUTS(ordinal_logistic_regression)
+                num_samples = 1000
+                mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+                mcmc.run(
+                    rng_key_, exp_sub_data, labels_exp
+                )
+
+                mcmc.print_summary(exclude_deterministic=False)
+
+                trace = mcmc.get_samples()
+                cutpoint0_exp = (trace['cutpoints'][0][0] + trace['cutpoints'][1][0]) / 2
+                cutpoint1_exp = (trace['cutpoints'][0][1] + trace['cutpoints'][1][1]) / 2
+
+                slope_list = []
+                for i in range(len(trace['coefs'][0, :])):
+                    slope_list.append(trace['coefs'][:, i].mean())
+
+                slope_exp = np.array(slope_list)
+                print('cutpoints and slope from experimental:', cutpoint0_exp, cutpoint1_exp, slope_exp)
+                logit_0 = cutpoint0_exp - np.dot(test_sub_data, slope_exp)
+                logit_1 = cutpoint1_exp - np.dot(test_sub_data, slope_exp)
+                q_0 = 1 / (1 + np.exp(-logit_0))
+                q_1 = 1 / (1 + np.exp(-logit_1))  # probability of class 1 or 0
+                prob_0 = q_0
+                prob_1 = q_1 - q_0
+                prob_2 = 1 - q_1
+                probs = jnp.stack((prob_0, prob_1, prob_2), axis=1)
+                P_HAT_exp[reg_variables] = probs
+
+                """1. Assuming Hzc we can use only observational data"""
+                rng_key = random.PRNGKey(np.random.randint(100))
+                rng_key, rng_key_ = random.split(rng_key)
+                kernel = NUTS(ordinal_logistic_regression)
+                num_samples = 1000
+                mcmc = MCMC(kernel, num_warmup=1000, num_chains=1, num_samples=num_samples)
+                mcmc.run(
+                    rng_key_, sub_data, labels_obs
+                )
+
+                mcmc.print_summary(exclude_deterministic=False)
+
+                trace = mcmc.get_samples()
+                cutpoint0_obs = (trace['cutpoints'][0][0] + trace['cutpoints'][1][0]) / 2
+                cutpoint1_obs = (trace['cutpoints'][0][1] + trace['cutpoints'][1][1]) / 2
+
+                slope_list = []
+                for i in range(len(trace['coefs'][0, :])):
+                    slope_list.append(trace['coefs'][:, i].mean())
+
+                slope_obs = np.array(slope_list)
+                print('cutpoints and slope from observational:', cutpoint0_obs, cutpoint1_obs, slope_obs)
+                logit_0 = cutpoint0_obs - np.dot(test_sub_data, slope_obs)
+                logit_1 = cutpoint1_obs - np.dot(test_sub_data, slope_obs)
+                q_0 = 1 / (1 + np.exp(-logit_0))
+                q_1 = 1 / (1 + np.exp(-logit_1))  # probability of class 1 or 0
+                prob_0 = q_0
+                prob_1 = q_1 - q_0
+                prob_2 = 1 - q_1
+                probs = jnp.stack((prob_0, prob_1, prob_2), axis=1)
+                P_HAT_obs[reg_variables] = probs
+
+            print('P(De|Do,HZ)', P_CMB)
+            print('P(De|Do,HZc)', P_not_CMB)
+            print('P(De|Do,HZ )P(Do|HZ )', P_Hzc)
+            print('P(De|Do,HZc )P(Do|HZc )', P_Hz_not_c)
+
+            # Calculate the log(p1+p2+p3) when you have log(p1),log(p2),log(p3)
+            val_P_Hzc = list(P_Hzc.values())
+            val_P_Hzc_ = list(P_Hz_not_c.values())
+            # Combine the values of p's into a single list
+            combined_values = val_P_Hzc + val_P_Hzc_
+            lns = [value for value in combined_values]
+            sum_logs = jax.scipy.special.logsumexp(np.array(lns))
+            # print("The log of the sum of the numbers is:", sum_logs)
+
+            # Calculate equation 3
+            for i in range(len(subset_list)):
+                reg_variables = subset_list[i]
+                P_HZ[reg_variables] = math.exp(val_P_Hzc[i] - sum_logs)
+                P_HZC[reg_variables] = math.exp(val_P_Hzc_[i] - sum_logs)
+                print('PHz for set', reg_variables, P_HZ[reg_variables])
+                print('PHzc for set', reg_variables, P_HZC[reg_variables])
+
+            new_row = [P_HZ[(0, 1, 2)], P_HZC[(0, 1, 2)], P_HZ[(0, 1)], P_HZC[(0, 1)], P_HZ[(0, 2)], P_HZC[(0, 2)], P_HZ[(0, )], P_HZC[(0, )]]
+
+            df.loc[len(df)] = new_row
+        # Calculate the average post-intervention outcome
+        P_Yzc = {}
+        P_Yz_not_c = {}
+
+        for key in P_HZC:
+            """Only exp data"""
+            P_Yz_not_c[key] = P_HZC[key] * P_HAT_exp[key]
+
+        for key in P_HZ:
+            """Use obs and exp data"""
+            P_Yzc[key] = P_HZ[key] * P_HAT_alg[key]
+
+        P_Y_alg = sum(P_Yzc.values()) + sum(P_Yz_not_c.values())
+        # print(P_Y_alg)
+
+        # Convert predicted probabilities to class labels
+        predicted_classes_alg = np.argmax(P_Y_alg, axis=1)
+        # Calculate Mean Squared Error
+        print('mse for our algorithm:', mean_squared_error(labels_test, predicted_classes_alg))
+        mse_alg.append(mean_squared_error(labels_test, predicted_classes_alg))
+
+
+        P_Y_exp = P_HAT_exp[(0, 1, 2)]
+        # Convert predicted probabilities to class labels
+        predicted_classes_exp = np.argmax(P_Y_exp, axis=1)
+        # Calculate Mean Squared Error
+        print('mse for our experimental:', mean_squared_error(labels_test, predicted_classes_exp))
+        mse_exp.append(mean_squared_error(labels_test, predicted_classes_exp))
+
+        P_Y_obs = P_HAT_obs[(0, 1, 2)]
+        # Convert predicted probabilities to class labels
+        predicted_classes_obs = np.argmax(P_Y_obs, axis=1)
+        # Calculate Mean Squared Error
+        print('mse for our observational:', mean_squared_error(labels_test, predicted_classes_obs))
+        mse_obs.append(mean_squared_error(labels_test, predicted_classes_obs))
+
+    print(Ne)
+
+    print('mse from our algorithm', mse_alg)
+    print('mse in experimental', mse_exp)
+    print('mses in observational', mse_obs)
+
+    print(df)
