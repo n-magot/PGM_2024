@@ -29,7 +29,7 @@ In the code given, you can adjust the confounding coefficient, b4, the number of
 We evaluate our methods in how well they predict the outcome in a new experimental data set with 1000 samples.
 
 ## Getting Started
-### Prerequisites
+### Packages
 This project uses several Python packages to perform probabilistic programming, Bayesian inference, and efficient array computations:
 
 * JAX and JAX.numpy
