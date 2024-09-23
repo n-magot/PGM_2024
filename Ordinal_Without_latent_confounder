@@ -224,8 +224,8 @@ for ne in ne_list:
 
         """Let's assume that C is a latent confounder and that MB(Y)=(T,Z2)"""
         MB = [(0, 1, 2)]
-        for IMB in MB[0]:
-            sample_list = list(MB)
+        for IMB in MB:
+            sample_list = list(MB[0])
 
             """Searching for subsets of MB that contain the treatment T"""
             subset_list = []
