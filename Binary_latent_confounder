@@ -174,9 +174,9 @@ for k in range(N_D_test):
     # print('how many 1 in observational', np.count_nonzero(labels_obs == 1))
 
     """Let's assume that C is a latent confounder and that MB(Y)=(T,Z2)"""
-    IMB = [(0, 1)]
-    for MB in IMB:
-        sample_list = list(MB)
+    MB = [(0, 1)]
+    for IMB in MB:
+        sample_list = list(MB[0])
 
         """Searching for subsets of MB that contain the treatment T"""
         subset_list = []
@@ -201,7 +201,7 @@ for k in range(N_D_test):
         num_samples = 1000
 
         """P(Do| H_MB)"""
-        sub_data = data_obs[:, MB]
+        sub_data = data_obs[:, MB[0]]
         prior_samples = sample_prior(sub_data, num_samples)
         marginal_MB = calculate_log_marginal(num_samples, prior_samples, sub_data, labels_obs)
         P_Do = marginal_MB
