@@ -223,8 +223,8 @@ for ne in ne_list:
         # data_exp[:, -2:] = (data_exp[:, -2:] - data_exp[:, -2:].mean(axis=0)) / data_exp[:, -2:].std(axis=0)
 
         """Let's assume that C is a latent confounder and that MB(Y)=(T,Z2)"""
-        IMB = [(0, 1, 2)]
-        for MB in IMB:
+        MB = [(0, 1, 2)]
+        for IMB in MB[0]:
             sample_list = list(MB)
 
             """Searching for subsets of MB that contain the treatment T"""
@@ -256,7 +256,7 @@ for ne in ne_list:
             num_samples = 1000
 
             """P(Do| H_MB)"""
-            sub_data = data_obs[:, MB]
+            sub_data = data_obs[:, MB[0]]
             prior_samples = sample_prior(sub_data, num_samples)
             marginal_MB = calculate_log_marginal(num_samples, prior_samples, sub_data, labels_obs)
             P_Do = marginal_MB
