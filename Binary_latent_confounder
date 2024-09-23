@@ -232,7 +232,7 @@ for k in range(N_D_test):
 
             #Numeratot of Equation (1)
             """Calculate P(Do| HZc) = P_Do <>0 for MB"""
-            if reg_variables == MB:
+            if reg_variables == MB[0]:
                 P_Hzc[reg_variables] = P_CMB[reg_variables] + P_Do
             else:
                 P_Hzc[reg_variables] = P_CMB[reg_variables] + math.log(sys.float_info.min)
